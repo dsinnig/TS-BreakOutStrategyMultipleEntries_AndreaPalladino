@@ -1,0 +1,147 @@
+{
+***BETA VERSION: DO NOT USE FOR LIVE TRADING***
+Developed by Daniel Sinnig
+BIIUSE Consulting and Investment Inc
+v0.1
+}
+
+[IntraBarOrderGeneration = TRUE]
+
+Inputs: ATR_Period(14), balanceRisk(.75), balanceForBackTesting(100000), lookBackPeriodForEntry(50), lookBackPeriodForExit(30), multiplierForInitialStopLoss(2), maxAddOns(4), addOnLevelInATR(1);
+
+Vars:	
+	rtBalance(0), 
+	tradingEnabled(true),
+	highestCloseIndex(0), 
+	highestClose(0), 
+	lowestCloseIndex(0), 
+	lowestClose(0), 
+	stopLossInMicroPips(0), 
+	convestionFactorPriceToMicroPips(1000), 
+	newStopLossLevel(0),
+	intrabarpersist amount(0),
+	intrabarpersist numberOfOpenTrades(0),
+	intrabarpersist ATR(0), 
+	intrabarpersist entryPr(-1),
+	intrabarpersist stopLossLevel(0.0);
+	
+//sanity checks if tradestation is configured perperly
+If (getAppInfo(aiPLofAcctCurrency) <> 1) then begin
+	once Print ("Strategy currency must be set to account currency (Format -> Strategies -> Properties for All -> Currency");
+	tradingEnabled = FALSE;
+end;
+
+If (Maxbarsback < MaxList(lookBackPeriodForEntry, lookBackPeriodForExit)) then begin
+	//not enough bars on the chart
+	tradingEnabled = FALSE;
+end;
+
+If (tradingEnabled = TRUE) then begin
+	//Just entered in new position? If yes get exact entry price
+	if (Marketposition <> 0) AND (Barssinceentry = 0) then begin
+		if (entryPr = -1) then entryPr = EntryPrice;
+	end;
+	
+	//Print log messages that long / short trade was entered
+	if (Marketposition = 1) AND (Barssinceentry = 0) and (barstatus(1) = 2) then begin
+		Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), " : Go Long with entry price: ", entryPr:0:5, " and position size: ", amount);
+	end;
+	
+	if (Marketposition = -1) AND (Barssinceentry = 0) and (barstatus(1) = 2) then begin
+		Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": Go Short with entry price: ", entryPr:0:5, " and position size: ", amount);
+	end;
+	
+	//If long check if price moved up in our favor for add-on trade
+	if (Marketposition = 1) then begin 
+		if (close > (entryPr + numberOfOpenTrades * addOnLevelInATR * ATR)) and (numberOfOpenTrades <= maxAddOns)  then begin
+			Print(ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": Add on at: ", Close:0:5);
+			Buy ("ADD-ON LG") amount shares next bar at market;
+			numberOfOPenTrades = numberOfOpenTrades +1;
+		end;
+	end; 
+	
+	//If short check if price moved down in our favor for add-on trade
+	if (Marketposition = -1) then begin 
+		if (close < (entryPr - numberOfOpenTrades * addOnLevelInATR * ATR)) and (numberOfOpenTrades <= maxAddOns)  then begin
+			Print(ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": Add on at: ", Close:0:5);
+			SellShort ("ADD-ON SH") amount shares next bar at market;
+			numberOfOPenTrades = numberOfOpenTrades +1;
+		end;
+	end;
+	
+	//Refresh order for stop loss (long trades) either back stop loss level or by exit criteria
+	if (Marketposition = 1) then begin 
+		newStopLossLevel = (entryPr - ATR * multiplierForInitialStopLoss) + ATR * addOnLevelInATR * (numberOfOpenTrades-1);
+		if (newStopLossLevel <> stopLossLevel) then begin
+			Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": Set stoploss to: ", newStopLossLevel:0:5);
+			stopLossLevel = newStopLossLevel;
+		end;
+		sell ("SL LG") all shares next bar at stopLossLevel stop;
+		value1 = extremes(close, lookBackPeriodForExit, -1, lowestClose, lowestCloseIndex);
+		if (lowestCloseIndex = 0) then begin	
+			sell ("EX LG") all shares next bar at market;
+		end;
+	end;
+	
+	//Refresh order for stop loss (short trades) either back stop loss level or by exit criteria
+	if (Marketposition = -1) then begin 
+		newStopLossLevel = (entryPr + ATR * multiplierForInitialStopLoss) - ATR * addOnLevelInATR * (numberOfOpenTrades-1);
+		if (newStopLossLevel <> stopLossLevel) then begin
+			Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": Set stoploss to: ", newStopLossLevel:0:5);
+			stopLossLevel = newStopLossLevel;
+		end;
+		BuyToCover ("ST SH") all shares next bar at stopLossLevel stop;
+		value1 = extremes(close, lookBackPeriodForExit, 1, highestClose, highestCloseIndex);
+		if (highestCloseIndex = 0) then begin	
+			BuyToCover ("EX SH") all shares next bar at market;
+		end;
+	end;
+	
+	//if flat, check if the trade just closed and reset the trade parameters
+	if (Marketposition = 0) AND (numberOfOpenTrades <> 0) then begin 
+		//we just got stopped out or exit criteria was reached
+		Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": Stopped out or exited at approx. ", close:0:5);
+		//reset everything
+		numberOfOpenTrades = 0;
+		ATR = 0;
+		entryPr = -1;
+	end;
+	
+	//if flat, check if breakout occured
+	If (Marketposition = 0) and (BarStatus(1) = 2) then begin
+		convestionFactorPriceToMicroPips = PriceScale;
+		//check for breakout
+		value1 = extremes(close, lookBackPeriodForEntry, 1, highestClose, highestCloseIndex);
+		value1 = extremes(close, lookBackPeriodForEntry, -1, lowestClose, lowestCloseIndex);
+		
+		//long entry
+		if (highestCloseIndex = 0) then begin	
+			//get balance
+			if (LastBarOnChart = TRUE) then rtBalance = GetRTCashBalance(Getaccountid)
+			else rtBalance = Round((balanceForBackTesting + NetProfit + OpenPositionProfit),0);
+			//get ATR
+			ATR = AvgTrueRange(ATR_Period);
+			Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time),  ": ATR for long trade is: ", ATR:2:5);
+			stopLossInMicroPips = ATR * multiplierForInitialStopLoss * convestionFactorPriceToMicroPips;
+			//calculate position size
+			amount = getPositionSize(rtBalance, balanceRisk, stopLossInMicroPips);
+			Buy ("LG BO") amount shares next bar at market;
+			numberOfOPenTrades = numberOfOpenTrades +1;
+		end;
+		//short entry
+		if (lowestCloseIndex = 0) then begin	
+			//get balance
+			if (LastBarOnChart = TRUE) then rtBalance = GetRTCashBalance(Getaccountid)
+			else rtBalance = Round((balanceForBackTesting + NetProfit + OpenPositionProfit),0);
+			//get ATR
+			ATR = AvgTrueRange(ATR_Period);
+			Print (ELDateToString(Date), " ", FormatTime("hh:mm:ss", Time), ": ATR for short trade is: ", ATR:2:5);
+			stopLossInMicroPips = ATR * multiplierForInitialStopLoss * convestionFactorPriceToMicroPips;
+			//calculate position size
+			amount = getPositionSize(rtBalance, balanceRisk, stopLossInMicroPips);
+			SellShort ("SH BO") amount shares next bar at market;
+			numberOfOpenTrades = numberOfOpenTrades +1;
+		end;
+	end;
+end;
+
